@@ -115,14 +115,16 @@ class PlexApi:
             root = ElementTree.fromstring(sub_sec.text)
             parsed_libs = parse_library(root)
 
-            # Add library type and addedAt to each item
+            # Add library type and ensure addedAt is an integer
             for item in parsed_libs:
                 item['library_type'] = library['type']
-                item['addedAt'] = item.get('addedAt', 0)  # Ensure addedAt is present
-                all_items.append(item)
+                item['addedAt'] = int(item.get('addedAt', 0))  # Convert to int, default to 0
+                if item['addedAt'] > 0:  # Only include items with valid addedAt
+                    all_items.append(item)
 
         """ Sort and select the most recent item """
         if not all_items:
+            _LOGGER.warning("No recently added items found")
             return {
                 "data": {"all": {"data": [DEFAULT_PARSE_DICT]}},
                 "online": True,
@@ -132,15 +134,15 @@ class PlexApi:
         # Sort by addedAt (most recent first)
         most_recent_item = max(all_items, key=lambda x: x['addedAt'])
 
-        # Fetch trailer URL for the most recent item
-        item_type = 'movie' if most_recent_item.get('episode') == '' else 'show'
-        most_recent_item['trailer'] = await get_tmdb_trailer_url(self._hass, most_recent_item['title'], item_type)
+        # Fetch trailer URL
+        item_type = 'movie' if most_recent_item.get('type') == 'movie' else 'show'
+        most_recent_item['trailer'] = await get_tmdb_trailer_url(self._hass, most_recent_item.get('title', ''), item_type)
 
         # Format the most recent item
         parsed_data = parse_data(
             self._hass,
-            [most_recent_item],  # Pass single item as a list
-            1,  # max=1
+            [most_recent_item],  # Pass single item
+            1,  # Limit to 1 item
             info_url,
             self._token,
             identifier,
@@ -151,10 +153,19 @@ class PlexApi:
 
         # Ensure trailer URL is set
         if parsed_data and parsed_data[0].get('trailer') is None:
-            parsed_data[0]['trailer'] = await get_tmdb_trailer_url(self._hass, parsed_data[0]['title'], item_type)
+            parsed_data[0]['trailer'] = await get_tmdb_trailer_url(self._hass, parsed_data[0].get('title', ''), item_type)
 
+        # Combine with DEFAULT_PARSE_DICT
         data_out = {
-            'all': {'data': [DEFAULT_PARSE_DICT] + parsed_data}
+            'all': {
+                'title_default': DEFAULT_PARSE_DICT['title_default'],
+                'line1_default': DEFAULT_PARSE_DICT['line1_default'],
+                'line2_default': DEFAULT_PARSE_DICT['line2_default'],
+                'line3_default': DEFAULT_PARSE_DICT['line3_default'],
+                'line4_default': DEFAULT_PARSE_DICT['line4_default'],
+                'icon': DEFAULT_PARSE_DICT['icon'],
+                'data': parsed_data  # Single item, no DEFAULT_PARSE_DICT prepended
+            }
         }
 
         return {
