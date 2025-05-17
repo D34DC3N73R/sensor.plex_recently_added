@@ -38,7 +38,7 @@ class PlexApi:
         self._port = port
         self._section_types = section_types
         self._section_libraries = section_libraries
-        self._exclude_keywords = exclude_keywords
+        self._exclude_keywords = [keyword.lower() for keyword in exclude_keywords]  # Normalize to lowercase
         self._images_base_url = f'/{name.lower() + "_" if len(name) > 0 else ""}plex_recently_added'
 
     async def update(self):
@@ -115,18 +115,23 @@ class PlexApi:
             root = ElementTree.fromstring(sub_sec.text)
             parsed_libs = parse_library(root)
 
-            # Add library type and ensure addedAt is an integer
+            # Add library type and filter items
             for item in parsed_libs:
                 item['library_type'] = library['type']
-                item['addedAt'] = int(item.get('addedAt', 0))  # Convert to int, default to 0
-                if item['addedAt'] > 0:  # Only include items with valid addedAt
-                    all_items.append(item)
+                item['addedAt'] = int(item.get('addedAt', 0))  # Convert to int
+                if item['addedAt'] <= 0:
+                    continue
+                # Apply exclude_keywords filter
+                title = item.get('title', '').lower()
+                if any(keyword in title for keyword in self._exclude_keywords):
+                    continue
+                all_items.append(item)
 
         """ Sort and select the most recent item """
         if not all_items:
             _LOGGER.warning("No recently added items found")
             return {
-                "data": {"all": {"data": [DEFAULT_PARSE_DICT]}},
+                "data": {"all": DEFAULT_PARSE_DICT},
                 "online": True,
                 "libraries": libs
             }
@@ -141,21 +146,21 @@ class PlexApi:
         # Format the most recent item
         parsed_data = parse_data(
             self._hass,
-            [most_recent_item],  # Pass single item
-            1,  # Limit to 1 item
+            [most_recent_item],
+            1,
             info_url,
             self._token,
             identifier,
             'all',
             self._images_base_url,
-            True  # is_all=True
+            True
         )
 
         # Ensure trailer URL is set
         if parsed_data and parsed_data[0].get('trailer') is None:
             parsed_data[0]['trailer'] = await get_tmdb_trailer_url(self._hass, parsed_data[0].get('title', ''), item_type)
 
-        # Combine with DEFAULT_PARSE_DICT
+        # Create output
         data_out = {
             'all': {
                 'title_default': DEFAULT_PARSE_DICT['title_default'],
@@ -164,7 +169,7 @@ class PlexApi:
                 'line3_default': DEFAULT_PARSE_DICT['line3_default'],
                 'line4_default': DEFAULT_PARSE_DICT['line4_default'],
                 'icon': DEFAULT_PARSE_DICT['icon'],
-                'data': parsed_data  # Single item, no DEFAULT_PARSE_DICT prepended
+                'data': parsed_data or [DEFAULT_PARSE_DICT]
             }
         }
 
