@@ -8,11 +8,13 @@ from .const import DEFAULT_PARSE_DICT, USER_AGENT, ACCEPTS
 from .parser import parse_data, parse_library
 from .tmdb_api import get_tmdb_trailer_url
 
+
 def check_headers(response):
     if 'text/xml' not in response.headers.get('Content-Type', '') and 'application/xml' not in response.headers.get('Content-Type', ''):
         raise ValueError(f"Expected XML but received different content type: {response.headers.get('Content-Type')}")
 
-class PlexApi():
+
+class PlexApi:
     def __init__(
         self,
         hass: HomeAssistant,
@@ -50,39 +52,39 @@ class PlexApi():
         try:
             info_res = await self._hass.async_add_executor_job(
                 requests.get,
-                f'{info_url}?X-Plex-Token={self._token}', 
+                f'{info_url}?X-Plex-Token={self._token}',
                 {
-                    "headers":{
+                    "headers": {
                         "User-agent": USER_AGENT,
                         "Accept": ACCEPTS,
                     },
-                    "timeout":10
+                    "timeout": 10
                 }
             )
             check_headers(info_res)
             root = ElementTree.fromstring(info_res.text)
             identifier = root.get("machineIdentifier")
-        except OSError as e:
-            raise FailedToLogin
+        except Exception as e:
+            raise FailedToLogin(str(e))
 
         url_base = f'{info_url}/library/sections'
         all_libraries = f'{url_base}/all'
         recently_added = (url_base + '/{0}/recentlyAdded?X-Plex-Container-Start=0&X-Plex-Container-Size={1}')
         on_deck = (url_base + '/{0}/onDeck?X-Plex-Container-Start=0&X-Plex-Container-Size={1}')
 
-        """Find the ID of all libraries in Plex."""
+        """ Find the ID of all libraries in Plex """
         sections = []
         libs = []
         try:
             libraries = await self._hass.async_add_executor_job(
                 requests.get,
-                f'{all_libraries}?X-Plex-Token={self._token}', 
+                f'{all_libraries}?X-Plex-Token={self._token}',
                 {
-                    "headers":{
+                    "headers": {
                         "User-agent": USER_AGENT,
                         "Accept": ACCEPTS,
                     },
-                    "timeout":10
+                    "timeout": 10
                 }
             )
             check_headers(libraries)
@@ -90,58 +92,73 @@ class PlexApi():
             for lib in root.findall("Directory"):
                 libs.append(lib.get("title"))
                 if lib.get("type") in self._section_types and (len(self._section_libraries) == 0 or lib.get("title") in self._section_libraries):
-                    sections.append({'type': lib.get("type"),'key': lib.get("key")})
-        except OSError as e:
-            raise FailedToLogin
+                    sections.append({'type': lib.get("type"), 'key': lib.get("key")})
+        except Exception as e:
+            raise FailedToLogin(str(e))
 
-        """ Looping through all libraries (sections) """
-        data = {
-            'all': {}
-        }
-        for s in self._section_types:
-            data[s] = []
-
+        """ Collect all recently added items across libraries """
+        all_items = []
         for library in sections:
             recent_or_deck = on_deck if self._on_deck else recently_added
             sub_sec = await self._hass.async_add_executor_job(
                 requests.get,
-                f'{recent_or_deck.format(library["key"], self._max * 2)}&X-Plex-Token={self._token}', 
+                f'{recent_or_deck.format(library["key"], self._max * 2)}&X-Plex-Token={self._token}',
                 {
-                    "headers":{
+                    "headers": {
                         "User-agent": USER_AGENT,
                         "Accept": ACCEPTS,
                     },
-                    "timeout":10
+                    "timeout": 10
                 }
             )
             check_headers(sub_sec)
             root = ElementTree.fromstring(sub_sec.text)
             parsed_libs = parse_library(root)
-            
-            # Fetch trailer URLs for each item
-            for item in parsed_libs:
-                item['trailer'] = await get_tmdb_trailer_url(self._hass, item['title'], library['type'])
-            
-            if library["type"] not in data['all']:
-                data['all'][library["type"]] = []
-            data['all'][library["type"]] += parsed_libs
-            data[library["type"]] += parsed_libs
 
-        data_out = {}
-        for k in data.keys():
-            parsed_data = parse_data(self._hass, data[k], self._max, info_url, self._token, identifier, k, self._images_base_url, k == "all")
-            
-            # Ensure trailer URLs are correctly set for the "all" sensor
-            if k == "all":
-                for item in parsed_data:
-                    if item.get('trailer') is None:
-                        item_type = 'movie' if item.get('episode') == '' else 'show'
-                        item['trailer'] = await get_tmdb_trailer_url(self._hass, item['title'], item_type)
-            
-            data_out[k] = {'data': [DEFAULT_PARSE_DICT] + parsed_data}
+            # Add library type and addedAt to each item
+            for item in parsed_libs:
+                item['library_type'] = library['type']
+                item['addedAt'] = item.get('addedAt', 0)  # Ensure addedAt is present
+                all_items.append(item)
+
+        """ Sort and select the most recent item """
+        if not all_items:
+            return {
+                "data": {"all": {"data": [DEFAULT_PARSE_DICT]}},
+                "online": True,
+                "libraries": libs
+            }
+
+        # Sort by addedAt (most recent first)
+        most_recent_item = max(all_items, key=lambda x: x['addedAt'])
+
+        # Fetch trailer URL for the most recent item
+        item_type = 'movie' if most_recent_item.get('episode') == '' else 'show'
+        most_recent_item['trailer'] = await get_tmdb_trailer_url(self._hass, most_recent_item['title'], item_type)
+
+        # Format the most recent item
+        parsed_data = parse_data(
+            self._hass,
+            [most_recent_item],  # Pass single item as a list
+            1,  # max=1
+            info_url,
+            self._token,
+            identifier,
+            'all',
+            self._images_base_url,
+            True  # is_all=True
+        )
+
+        # Ensure trailer URL is set
+        if parsed_data and parsed_data[0].get('trailer') is None:
+            parsed_data[0]['trailer'] = await get_tmdb_trailer_url(self._hass, parsed_data[0]['title'], item_type)
+
+        data_out = {
+            'all': {'data': [DEFAULT_PARSE_DICT] + parsed_data}
+        }
 
         return {
-            "data": {**data_out},
+            "data": data_out,
             "online": True,
             "libraries": libs
         }
